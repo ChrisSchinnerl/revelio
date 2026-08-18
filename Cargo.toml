@@ -1,0 +1,23 @@
+[package]
+name = "revelio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.29"
+egui_extras = "0.29"
+rfd = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "fs", "io-util"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sia_storage = { version = "0.11.0" }
+directories = "6"
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# CPU-intensive SDK operations (hashing, erasure coding) are ~100x slower in a
+# debug build; keep dependencies optimized even in dev.
+[profile.dev.package."*"]
+opt-level = 3
