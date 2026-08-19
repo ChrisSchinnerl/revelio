@@ -660,7 +660,7 @@ impl App {
         // Width that fits a full 64-char hex id (plus cell padding), so the id
         // column shows the whole id by default.
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
-        let id_width = ui.fonts(|f| {
+        let id_width = ui.ctx().fonts_mut(|f| {
             f.layout_no_wrap("0".repeat(64), mono.clone(), egui::Color32::PLACEHOLDER)
                 .size()
                 .x
@@ -834,6 +834,7 @@ impl App {
                                 resp.rect,
                                 2.0,
                                 hover_stroke,
+                                egui::StrokeKind::Inside,
                             );
                         }
                         if resp.clicked() {
@@ -845,24 +846,24 @@ impl App {
                         resp.context_menu(|ui| {
                             if ui.button("View metadata").clicked() {
                                 action.set(Some(RowAction::ViewMetadata(oi)));
-                                ui.close_menu();
+                                ui.close();
                             }
                             // Text/JSON edits as text; binary edits as hex.
                             if ui.button("Edit metadata").clicked() {
                                 action.set(Some(RowAction::EditMetadata(oi)));
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Copy object id").clicked() {
                                 ui.ctx().copy_text(objects[oi].id.clone());
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("⬇ Download").clicked() {
                                 action.set(Some(RowAction::Download(oi)));
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("🗑 Delete").clicked() {
                                 action.set(Some(RowAction::Delete(oi)));
-                                ui.close_menu();
+                                ui.close();
                             }
                         });
                     }

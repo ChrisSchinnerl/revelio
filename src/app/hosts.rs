@@ -183,11 +183,11 @@ impl App {
         // Right panel: map on top, selected host's details below. The list lives
         // in a CentralPanel so it can't overlap the SidePanel before it's resized.
         let refresh_selected = std::cell::Cell::new(false);
-        egui::SidePanel::right("host-map-panel")
+        egui::Panel::right("host-map-panel")
             .resizable(true)
-            .default_width(520.0)
-            .width_range(300.0..=1000.0)
-            .show_inside(ui, |ui| {
+            .default_size(520.0)
+            .size_range(300.0..=1000.0)
+            .show(ui, |ui| {
                 self.host_map(ui, &points);
                 ui.separator();
                 egui::ScrollArea::vertical()
@@ -211,7 +211,7 @@ impl App {
         self.scroll_to_selected = false;
         // Host clicked-to-select this frame (applied after the borrow ends).
         let clicked: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -264,7 +264,7 @@ impl App {
         let (resp, painter) =
             ui.allocate_painter(egui::vec2(width, map_h), egui::Sense::click_and_drag());
         let avail = resp.rect;
-        let rounding = egui::Rounding::same(6.0);
+        let rounding = egui::CornerRadius::same(6);
 
         // Keep the 2:1 aspect ratio (else continents stretch); anchor to the top,
         // centered horizontally, so it aligns with the list.
@@ -289,7 +289,7 @@ impl App {
                 vy -= d.y / (z * h);
             }
             if on_map {
-                let (scroll_y, pinch) = ui.input(|i| (i.raw_scroll_delta.y, i.zoom_delta()));
+                let (scroll_y, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
                 let factor = pinch * (scroll_y * 0.0015).exp();
                 if let Some(c) = resp.hover_pos().filter(|_| (factor - 1.0).abs() > 1e-4) {
                     // Keep the world point under the cursor fixed while zooming.
@@ -395,28 +395,30 @@ impl App {
             rect,
             rounding,
             egui::Stroke::new(1.0, egui::Color32::from_gray(72)),
+            egui::StrokeKind::Inside,
         );
 
         if let Some(idx) = hovered {
             let p = &points[idx];
-            egui::show_tooltip_at_pointer(
-                ui.ctx(),
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
                 ui.layer_id(),
                 egui::Id::new("host-map-tip"),
-                |ui| {
-                    // Let the tooltip grow to fit rather than wrapping the hashes.
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    ui.label(egui::RichText::new(&p.pubkey).monospace());
-                    ui.label(if p.country.is_empty() {
-                        "location unknown".to_string()
-                    } else {
-                        p.country.clone()
-                    });
-                    for addr in &p.addresses {
-                        ui.monospace(addr);
-                    }
-                },
-            );
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                // Let the tooltip grow to fit rather than wrapping the hashes.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.label(egui::RichText::new(&p.pubkey).monospace());
+                ui.label(if p.country.is_empty() {
+                    "location unknown".to_string()
+                } else {
+                    p.country.clone()
+                });
+                for addr in &p.addresses {
+                    ui.monospace(addr);
+                }
+            });
             // Select on a plain click (a drag pans instead).
             if resp.clicked() {
                 self.selected_host = Some(p.pubkey.clone());

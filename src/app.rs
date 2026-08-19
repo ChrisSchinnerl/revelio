@@ -128,32 +128,31 @@ pub(crate) const ACCENT: egui::Color32 = egui::Color32::from_rgb(45, 200, 110);
 
 /// Applies revelio's theme: green accent, rounded widgets, roomier spacing.
 fn configure_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    let v = &mut style.visuals;
+    ctx.all_styles_mut(|style| {
+        let v = &mut style.visuals;
 
-    // Brand-green accent in place of egui's default blue.
-    v.selection.bg_fill = egui::Color32::from_rgb(26, 74, 48);
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-    v.hyperlink_color = ACCENT;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.5, ACCENT);
+        // Brand-green accent in place of egui's default blue.
+        v.selection.bg_fill = egui::Color32::from_rgb(26, 74, 48);
+        v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+        v.hyperlink_color = ACCENT;
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.5, ACCENT);
 
-    let r = egui::Rounding::same(4.0);
-    for w in [
-        &mut v.widgets.noninteractive,
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-    ] {
-        w.rounding = r;
-    }
-    v.window_rounding = egui::Rounding::same(8.0);
+        let r = egui::CornerRadius::same(4);
+        for w in [
+            &mut v.widgets.noninteractive,
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+            &mut v.widgets.open,
+        ] {
+            w.corner_radius = r;
+        }
+        v.window_corner_radius = egui::CornerRadius::same(8);
 
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
-
-    ctx.set_style(style);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    });
 }
 
 impl App {
@@ -565,7 +564,8 @@ fn confirm_modal(
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.drain_events();
 
         // Auto-open the approval URL; the shown link is only a fallback.
@@ -573,7 +573,7 @@ impl eframe::App for App {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
                 ui.label(
@@ -594,7 +594,7 @@ impl eframe::App for App {
             egui::Window::new("Add connection")
                 .collapsible(false)
                 .resizable(false)
-                .show(ctx, |ui| self.connect_form(ui));
+                .show(&ctx, |ui| self.connect_form(ui));
         }
 
         if let Some(id) = self.pending_delete {
@@ -606,7 +606,7 @@ impl eframe::App for App {
                 .unwrap_or_default();
             // Removal is applied when the backend's ConnectionRemoved event arrives.
             match confirm_modal(
-                ctx,
+                &ctx,
                 "Delete connection",
                 &format!("Delete connection \"{nickname}\"?"),
                 None,
@@ -622,15 +622,15 @@ impl eframe::App for App {
             }
         }
 
-        egui::SidePanel::left("connections")
+        egui::Panel::left("connections")
             .resizable(true)
-            .default_width(300.0)
-            .show(ctx, |ui| {
+            .default_size(300.0)
+            .show(ui, |ui| {
                 // Account info fills the lower half of the sidebar.
-                egui::TopBottomPanel::bottom("account")
+                egui::Panel::bottom("account")
                     .resizable(true)
-                    .default_height(300.0)
-                    .show_inside(ui, |ui| {
+                    .default_size(300.0)
+                    .show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.heading("Account");
                         ui.separator();
@@ -651,7 +651,7 @@ impl eframe::App for App {
                     });
 
                 // Connections list fills the upper half.
-                egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     // Keep connection rows on a single line rather than wrapping.
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.add_space(4.0);
@@ -688,7 +688,7 @@ impl eframe::App for App {
                                 resp.context_menu(|ui| {
                                     if ui.button("🗑 Delete").clicked() {
                                         clicked_delete = Some(conn.id);
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 });
                             }
@@ -773,7 +773,7 @@ impl eframe::App for App {
         let scroll_to_match = self.search_scroll_pending;
         let mut matched_scrolled = false;
         let mut copied = false;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             if let Some(err) = self.error.clone() {
                 ui.horizontal(|ui| {
                     if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
@@ -1068,14 +1068,14 @@ impl eframe::App for App {
             None => {}
         }
 
-        self.upload_dialog(ctx);
-        self.downloads_window(ctx);
-        self.uploads_window(ctx);
-        self.metadata_dialog(ctx);
+        self.upload_dialog(&ctx);
+        self.downloads_window(&ctx);
+        self.uploads_window(&ctx);
+        self.metadata_dialog(&ctx);
 
         if let Some((conn_id, object_id)) = self.pending_object_delete.clone() {
             match confirm_modal(
-                ctx,
+                &ctx,
                 "Delete object",
                 "Delete this object?",
                 Some(&object_id),
@@ -1098,8 +1098,8 @@ impl eframe::App for App {
                 egui::Area::new(egui::Id::new("copied-toast"))
                     .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -28.0))
                     .interactable(false)
-                    .show(ctx, |ui| {
-                        egui::Frame::popup(&ctx.style()).show(ui, |ui| {
+                    .show(&ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.label(egui::RichText::new("✔ Copied to clipboard").color(ACCENT));
                         });
                     });
