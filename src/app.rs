@@ -59,6 +59,10 @@ struct ConnState {
     sharing_refreshed: Option<Instant>,
     /// A sharing key fetch is in flight (dedupes the auto-fetch on tab open).
     sharing_pending: bool,
+    /// Sharing keys imported from their holders, listed alongside the owned
+    /// ones. Loaded from the local DB, so an indexer that won't serve them
+    /// still leaves them visible.
+    imported_keys: Vec<SharingKeyInfo>,
 }
 
 pub struct App {
@@ -132,6 +136,7 @@ pub struct App {
     /// Keys whose attachment list was requested but hasn't arrived (dedup).
     shared_pending: HashSet<(i64, String)>,
     create_key: Option<CreateKeyDialog>,
+    import_key: Option<ImportKeyDialog>,
     attach_dialog: Option<AttachDialog>,
     /// A key awaiting revoke confirmation: (connection id, seed, description).
     pending_key_revoke: Option<(i64, String, String)>,
@@ -240,6 +245,7 @@ impl App {
             shared_objects: HashMap::new(),
             shared_pending: HashSet::new(),
             create_key: None,
+            import_key: None,
             attach_dialog: None,
             pending_key_revoke: None,
             shared_download: None,
@@ -294,6 +300,7 @@ impl App {
                             sharing_keys: None,
                             sharing_refreshed: None,
                             sharing_pending: false,
+                            imported_keys: Vec::new(),
                         });
                     }
                     if self.selected.is_none() {
@@ -324,6 +331,11 @@ impl App {
                         conn.sharing_keys = Some(keys);
                         conn.sharing_refreshed = Some(Instant::now());
                         conn.sharing_pending = false;
+                    }
+                }
+                Event::ImportedKeys { conn_id, keys } => {
+                    if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+                        conn.imported_keys = keys;
                     }
                 }
                 Event::SharedObjects {

@@ -47,6 +47,15 @@ impl ExpiryUnit {
     }
 }
 
+/// The "import sharing key" form.
+pub(crate) struct ImportKeyDialog {
+    pub(crate) conn_id: i64,
+    /// The pasted credential (hex seed).
+    pub(crate) seed: String,
+    /// A local name for it; recipients aren't told the owner's description.
+    pub(crate) label: String,
+}
+
 /// The object picker for attaching an object to a sharing key.
 pub(crate) struct AttachDialog {
     pub(crate) conn_id: i64,
@@ -56,8 +65,9 @@ pub(crate) struct AttachDialog {
     pub(crate) query: String,
 }
 
-/// Whether `s` is a 64-character hex object id.
-fn is_object_id(s: &str) -> bool {
+/// Whether `s` is a 64-character hex string: the shape of both an object id
+/// and a sharing key seed.
+fn is_hex_256(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -70,14 +80,16 @@ impl App {
         {
             self.connections[cidx].sharing_pending = true;
             let _ = self.cmd_tx.send(Command::FetchSharingKeys { conn_id });
+            let _ = self.cmd_tx.send(Command::FetchImportedKeys { conn_id });
         }
 
         ui.horizontal(|ui| {
-            let count = self.connections[cidx]
+            let owned = self.connections[cidx]
                 .sharing_keys
                 .as_ref()
                 .map_or(0, Vec::len);
-            ui.heading(format!("Sharing keys ({count})"));
+            let imported = self.connections[cidx].imported_keys.len();
+            ui.heading(format!("Sharing keys ({})", owned + imported));
             if ui.button("➕ New key").clicked() {
                 self.create_key = Some(CreateKeyDialog {
                     conn_id,
@@ -87,9 +99,21 @@ impl App {
                     unit: ExpiryUnit::Days,
                 });
             }
+            if ui
+                .button("Import key…")
+                .on_hover_text("Use a sharing key someone gave you")
+                .clicked()
+            {
+                self.import_key = Some(ImportKeyDialog {
+                    conn_id,
+                    seed: String::new(),
+                    label: String::new(),
+                });
+            }
             if ui.button("Refresh").clicked() {
                 self.connections[cidx].sharing_pending = true;
                 let _ = self.cmd_tx.send(Command::FetchSharingKeys { conn_id });
+                let _ = self.cmd_tx.send(Command::FetchImportedKeys { conn_id });
             }
             if let Some(t) = self.connections[cidx].sharing_refreshed {
                 ui.weak(format!("refreshed {}", ago(t.elapsed())));
@@ -100,12 +124,34 @@ impl App {
 
         // Cloned so the panels below can take `&mut self` while drawing; an
         // account has few keys, so the copy is cheap.
-        let Some(keys) = self.connections[cidx].sharing_keys.clone() else {
+        let owned = self.connections[cidx].sharing_keys.clone();
+        let imported = self.connections[cidx].imported_keys.clone();
+        if owned.is_none() && imported.is_empty() {
             ui.weak("Loading sharing keys…");
             return;
-        };
+        }
+        // An imported key the account also owns would otherwise appear twice.
+        let owned_pks: Vec<&String> = owned
+            .iter()
+            .flatten()
+            .map(|k: &SharingKeyInfo| &k.public_key)
+            .collect();
+        let keys: Vec<SharingKeyInfo> = owned
+            .iter()
+            .flatten()
+            .cloned()
+            .chain(
+                imported
+                    .iter()
+                    .filter(|k| !owned_pks.contains(&&k.public_key))
+                    .cloned(),
+            )
+            .collect();
+        if owned.is_none() {
+            ui.weak("The account's own keys couldn't be listed; showing imported keys only.");
+        }
         if keys.is_empty() {
-            ui.weak("No sharing keys yet. Click “New key” to create one.");
+            ui.weak("No sharing keys yet. Create one, or import a key you were given.");
             return;
         }
 
@@ -148,7 +194,17 @@ impl App {
                     for key in &keys {
                         let is_selected =
                             self.selected_key.as_deref() == Some(key.public_key.as_str());
-                        let label = format!("{}  ({} objs)", description_of(key), key.object_count);
+                        let label = if key.unavailable {
+                            format!("{}  (imported, unavailable)", description_of(key))
+                        } else if key.imported {
+                            format!(
+                                "{}  ({} objs, imported)",
+                                description_of(key),
+                                key.object_count
+                            )
+                        } else {
+                            format!("{}  ({} objs)", description_of(key), key.object_count)
+                        };
                         let resp = ui
                             .selectable_label(is_selected, label)
                             .on_hover_text(&key.public_key);
@@ -160,7 +216,17 @@ impl App {
                             };
                         }
                         resp.context_menu(|ui| {
-                            if ui.button("🗑 Revoke").clicked() {
+                            // Revoking is the owner's operation; an imported key
+                            // can only be dropped locally.
+                            if key.imported {
+                                if ui.button("🗑 Forget").clicked() {
+                                    let _ = self.cmd_tx.send(Command::ForgetSharingKey {
+                                        conn_id,
+                                        public_key: key.public_key.clone(),
+                                    });
+                                    ui.close();
+                                }
+                            } else if ui.button("🗑 Revoke").clicked() {
                                 self.pending_key_revoke = Some((
                                     conn_id,
                                     key.seed.clone(),
@@ -219,9 +285,18 @@ impl App {
             card(ui, "On network", &human_size(key.pinned_size));
         });
 
+        if key.unavailable {
+            ui.weak(
+                "The indexer wouldn't serve this key: it may be revoked, expired, or from \
+                 another indexer. The stats above are placeholders.",
+            );
+        }
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("➕ Attach object…").clicked() {
+            // Attaching and revoking are signed by the owner's app key, so they
+            // are only offered for the account's own keys.
+            if !key.imported && ui.button("➕ Attach object…").clicked() {
                 self.attach_dialog = Some(AttachDialog {
                     conn_id,
                     key_seed: key.seed.clone(),
@@ -234,7 +309,19 @@ impl App {
                     .remove(&(conn_id, key.public_key.clone()));
                 self.fetch_shared(conn_id, key);
             }
-            if ui
+            if key.imported {
+                if ui
+                    .button("🗑 Forget")
+                    .on_hover_text("Drops the key locally; the key itself is untouched")
+                    .clicked()
+                {
+                    let _ = self.cmd_tx.send(Command::ForgetSharingKey {
+                        conn_id,
+                        public_key: key.public_key.clone(),
+                    });
+                    self.selected_key = None;
+                }
+            } else if ui
                 .button("🗑 Revoke")
                 .on_hover_text("Deletes the key and every attachment on it")
                 .clicked()
@@ -257,7 +344,7 @@ impl App {
         };
         ui.heading(format!("Attached objects ({})", objects.len()));
         if objects.is_empty() {
-            ui.weak("Nothing attached yet — the key grants access to no data.");
+            ui.weak("Nothing attached — the key grants access to no data.");
             return;
         }
         ui.weak("Downloads here go through the sharing key, as a recipient would.");
@@ -271,10 +358,12 @@ impl App {
                     // The save dialog is opened once the panels are drawn.
                     self.shared_download = Some((conn_id, key.seed.clone(), object.id.clone()));
                 }
-                if ui
-                    .small_button("Detach")
-                    .on_hover_text("Revoke access to this object")
-                    .clicked()
+                // Detaching re-writes the owner's attachment list.
+                if !key.imported
+                    && ui
+                        .small_button("Detach")
+                        .on_hover_text("Revoke access to this object")
+                        .clicked()
                 {
                     let _ = self.cmd_tx.send(Command::UnshareObject {
                         conn_id,
@@ -309,6 +398,7 @@ impl App {
     /// and the revoke confirmation.
     pub(crate) fn sharing_windows(&mut self, ctx: &egui::Context) {
         self.create_key_dialog(ctx);
+        self.import_key_dialog(ctx);
         self.attach_object_dialog(ctx);
 
         if let Some((conn_id, key_seed, object_id)) = self.shared_download.take()
@@ -441,6 +531,74 @@ impl App {
         }
     }
 
+    fn import_key_dialog(&mut self, ctx: &egui::Context) {
+        let mut import: Option<(i64, String, String)> = None;
+        let mut close = false;
+        if let Some(d) = &mut self.import_key {
+            egui::Window::new("Import sharing key")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    egui::Grid::new("import_sharing_key")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Key");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut d.seed)
+                                    .hint_text("64 hex characters, as copied from the owner")
+                                    .desired_width(420.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Label");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut d.label)
+                                    .hint_text("optional, e.g. alice's photos")
+                                    .desired_width(420.0),
+                            );
+                            ui.end_row();
+                        });
+
+                    let seed = d.seed.trim().to_string();
+                    if !seed.is_empty() && !is_hex_256(&seed) {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            "A sharing key is 64 hex characters.",
+                        );
+                    }
+                    ui.small(
+                        "Checked against this connection's indexer, then kept locally.                          The key is read-only: you can list and download what it grants.",
+                    );
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(is_hex_256(&seed), egui::Button::new("Import"))
+                            .clicked()
+                        {
+                            import = Some((d.conn_id, seed, d.label.trim().to_string()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+        }
+        if let Some((conn_id, seed, label)) = import {
+            let _ = self.cmd_tx.send(Command::ImportSharingKey {
+                conn_id,
+                seed,
+                label,
+            });
+            self.status = "Importing sharing key…".to_string();
+            self.import_key = None;
+        }
+        if close {
+            self.import_key = None;
+        }
+    }
+
     fn attach_object_dialog(&mut self, ctx: &egui::Context) {
         // The connection's synced objects, so the picker can list them.
         let objects: Vec<(String, u64)> = self
@@ -467,7 +625,7 @@ impl App {
                         );
                         // An id that isn't synced locally can still be attached.
                         if ui
-                            .add_enabled(is_object_id(d.query.trim()), egui::Button::new("Attach"))
+                            .add_enabled(is_hex_256(d.query.trim()), egui::Button::new("Attach"))
                             .clicked()
                         {
                             attach =
@@ -526,6 +684,7 @@ impl App {
         let _ = self.cmd_tx.send(Command::FetchSharedObjects {
             conn_id,
             key_seed: key.seed.clone(),
+            imported: key.imported,
         });
     }
 

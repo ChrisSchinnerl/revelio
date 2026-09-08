@@ -93,6 +93,58 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Records a sharing key someone handed us, replacing any earlier import
+    /// of the same key on this connection.
+    pub fn upsert_imported_key(
+        &self,
+        connection_id: i64,
+        public_key: &str,
+        seed: &str,
+        label: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO imported_sharing_keys
+                 (connection_id, public_key, seed, label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(connection_id, public_key)
+                 DO UPDATE SET seed = excluded.seed, label = excluded.label",
+            rusqlite::params![
+                connection_id,
+                public_key,
+                seed,
+                label,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The sharing keys imported for a connection, oldest first.
+    pub fn imported_keys(&self, connection_id: i64) -> Result<Vec<ImportedKeyRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT public_key, seed, label, created_at FROM imported_sharing_keys
+             WHERE connection_id = ?1 ORDER BY created_at, public_key",
+        )?;
+        let rows = stmt.query_map([connection_id], |row| {
+            Ok(ImportedKeyRow {
+                public_key: row.get(0)?,
+                seed: row.get(1)?,
+                label: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Drops an imported sharing key; the key itself is unaffected.
+    pub fn delete_imported_key(&self, connection_id: i64, public_key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM imported_sharing_keys WHERE connection_id = ?1 AND public_key = ?2",
+            rusqlite::params![connection_id, public_key],
+        )?;
+        Ok(())
+    }
+
     /// The indexer a connection talks to, if the connection still exists.
     pub fn indexer_url(&self, id: i64) -> Result<Option<String>> {
         let mut stmt = self
@@ -488,6 +540,14 @@ fn to_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// A sharing key imported from someone else.
+pub struct ImportedKeyRow {
+    pub public_key: String,
+    pub seed: String,
+    pub label: String,
+    pub created_at: String,
 }
 
 /// A synced object as stored, for display in the objects table.

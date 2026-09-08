@@ -64,3 +64,15 @@ CREATE TABLE IF NOT EXISTS object_sectors (
 -- Back the id search: prefix range scans on slab id / sector root per connection.
 CREATE INDEX IF NOT EXISTS idx_slabs_slab_id ON object_slabs (connection_id, slab_id);
 CREATE INDEX IF NOT EXISTS idx_sectors_root ON object_sectors (connection_id, root);
+
+-- Sharing keys handed to us by someone else, kept per connection so they can
+-- be used against that connection's indexer. Owned keys aren't stored: the
+-- indexer lists them and the SDK re-derives them from the app key.
+CREATE TABLE IF NOT EXISTS imported_sharing_keys (
+    connection_id INTEGER NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    public_key    TEXT NOT NULL,       -- the key's public half, as the indexer knows it
+    seed          TEXT NOT NULL,       -- the credential itself (hex)
+    label         TEXT NOT NULL,       -- local description; recipients aren't told the owner's
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (connection_id, public_key)
+);

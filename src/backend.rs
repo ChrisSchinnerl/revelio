@@ -11,8 +11,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sia_storage::{
     Account, AppApiError, AppKey, Builder, DateTime, Download, DownloadOptions, Hash256, Host,
-    HostQuery, KeyRecord, Object, Sdk, ShardProgress, SharedSdk, SharingError, SharingKey,
-    SharingKeyOptions, UploadOptions, Utc,
+    HostQuery, KeyRecord, KeyStats, Object, Sdk, ShardProgress, SharedSdk, SharingError,
+    SharingKey, SharingKeyOptions, UploadOptions, Utc,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -96,8 +96,23 @@ pub enum Command {
     },
     /// Delete a sharing key and every object attached to it.
     RevokeSharingKey { conn_id: i64, key_seed: String },
-    /// List the objects attached to a sharing key.
-    FetchSharedObjects { conn_id: i64, key_seed: String },
+    /// List the objects attached to a sharing key. An imported key is listed
+    /// as its holder (there is no owner-side view of someone else's key).
+    FetchSharedObjects {
+        conn_id: i64,
+        key_seed: String,
+        imported: bool,
+    },
+    /// List the sharing keys imported on a connection, refreshing their stats.
+    FetchImportedKeys { conn_id: i64 },
+    /// Store a sharing key handed to us, after checking it works.
+    ImportSharingKey {
+        conn_id: i64,
+        seed: String,
+        label: String,
+    },
+    /// Drop a locally imported sharing key. The key itself is untouched.
+    ForgetSharingKey { conn_id: i64, public_key: String },
     /// Attach an object to a sharing key, re-sealing its keys for recipients.
     ShareObject {
         conn_id: i64,
@@ -167,6 +182,12 @@ pub enum Event {
     },
     /// The account's sharing keys (FetchSharingKeys).
     SharingKeys {
+        conn_id: i64,
+        keys: Vec<SharingKeyInfo>,
+    },
+    /// The connection's imported sharing keys (FetchImportedKeys, and after
+    /// an import or forget).
+    ImportedKeys {
         conn_id: i64,
         keys: Vec<SharingKeyInfo>,
     },
@@ -355,7 +376,8 @@ async fn fetch_host_infos(sdk: &Sdk) -> Result<Vec<HostInfo>> {
     Ok(hosts)
 }
 
-/// One of an account's sharing keys, for the Sharing tab.
+/// A sharing key in the Sharing tab: either one the account owns or one that
+/// was imported from its holder.
 #[derive(Clone)]
 pub struct SharingKeyInfo {
     pub public_key: String,
@@ -369,6 +391,12 @@ pub struct SharingKeyInfo {
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: Option<String>,
+    /// True for a key handed to us: the account doesn't own it, so it can only
+    /// be listed and downloaded from, not modified.
+    pub imported: bool,
+    /// Set when the indexer wouldn't tell us about the key, so the stats above
+    /// are placeholders.
+    pub unavailable: bool,
 }
 
 /// An object attached to a sharing key, as the indexer reports it.
@@ -392,6 +420,47 @@ fn sharing_key_info(r: &KeyRecord) -> SharingKeyInfo {
         created_at: r.stats.created_at.to_rfc3339(),
         updated_at: r.stats.updated_at.to_rfc3339(),
         expires_at: r.stats.expires_at.map(|t| t.to_rfc3339()),
+        imported: false,
+        unavailable: false,
+    }
+}
+
+/// Builds the row for an imported key. A recipient isn't told the owner's
+/// description, so the locally-entered `label` stands in for it. `stats` is
+/// `None` when the indexer wouldn't serve them.
+fn imported_key_info(
+    row: &crate::store::ImportedKeyRow,
+    stats: Option<KeyStats>,
+) -> SharingKeyInfo {
+    match stats {
+        Some(s) => SharingKeyInfo {
+            public_key: row.public_key.clone(),
+            seed: row.seed.clone(),
+            description: row.label.clone(),
+            object_count: s.object_count,
+            object_size: s.object_size,
+            pinned_data: s.pinned_data,
+            pinned_size: s.pinned_size,
+            created_at: s.created_at.to_rfc3339(),
+            updated_at: s.updated_at.to_rfc3339(),
+            expires_at: s.expires_at.map(|t| t.to_rfc3339()),
+            imported: true,
+            unavailable: false,
+        },
+        None => SharingKeyInfo {
+            public_key: row.public_key.clone(),
+            seed: row.seed.clone(),
+            description: row.label.clone(),
+            object_count: 0,
+            object_size: 0,
+            pinned_data: 0,
+            pinned_size: 0,
+            created_at: row.created_at.clone(),
+            updated_at: row.created_at.clone(),
+            expires_at: None,
+            imported: true,
+            unavailable: true,
+        },
     }
 }
 
@@ -463,6 +532,40 @@ async fn emit_sharing_keys(emitter: &Emitter, sdk: &Sdk, conn_id: i64) -> Result
     let keys = fetch_sharing_keys(sdk).await?;
     log::debug!("connection {conn_id}: {} sharing keys", keys.len());
     emitter.send(Event::SharingKeys { conn_id, keys });
+    Ok(())
+}
+
+/// Pushes the objects an imported key grants access to, listed as its holder.
+async fn emit_imported_objects(
+    emitter: &Emitter,
+    db_path: &std::path::Path,
+    conn_id: i64,
+    key_seed: &str,
+) -> Result<()> {
+    const PAGE: u64 = 100;
+    let sdk = shared_sdk(db_path, conn_id, key_seed).await?;
+    let mut objects = Vec::new();
+    for offset in (0..).step_by(PAGE as usize) {
+        let page = sdk
+            .objects(Some(offset), Some(PAGE))
+            .await
+            .context("listing shared objects")?;
+        let done = page.len() < PAGE as usize;
+        objects.extend(page.iter().map(shared_object_info));
+        if done {
+            break;
+        }
+    }
+    let public_key = parse_sharing_key(key_seed)?.public_key().to_string();
+    log::debug!(
+        "imported key {public_key}: {} objects available",
+        objects.len()
+    );
+    emitter.send(Event::SharedObjects {
+        conn_id,
+        public_key,
+        objects,
+    });
     Ok(())
 }
 
@@ -961,17 +1064,78 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     },
                 );
             }
-            Command::FetchSharedObjects { conn_id, key_seed } => {
-                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
-                spawn_conn_op(
-                    &emitter,
-                    sdk,
-                    "Shared objects refresh",
-                    move |sdk, emitter| async move {
-                        let key = parse_sharing_key(&key_seed)?;
-                        emit_shared_objects(&emitter, &sdk, conn_id, &key).await
-                    },
-                );
+            Command::FetchSharedObjects {
+                conn_id,
+                key_seed,
+                imported,
+            } => {
+                if imported {
+                    // Listed as the key's holder; needs no live connection.
+                    let emitter = emitter.clone();
+                    let db_path = db_path.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            emit_imported_objects(&emitter, &db_path, conn_id, &key_seed).await
+                        {
+                            emitter.error(format!("Shared objects refresh failed: {e:#}"));
+                        }
+                    });
+                } else {
+                    let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                    spawn_conn_op(
+                        &emitter,
+                        sdk,
+                        "Shared objects refresh",
+                        move |sdk, emitter| async move {
+                            let key = parse_sharing_key(&key_seed)?;
+                            emit_shared_objects(&emitter, &sdk, conn_id, &key).await
+                        },
+                    );
+                }
+            }
+            Command::FetchImportedKeys { conn_id } => {
+                let emitter = emitter.clone();
+                let db_path = db_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = emit_imported_keys(&emitter, &db_path, conn_id).await {
+                        emitter.error(format!("Imported keys refresh failed: {e:#}"));
+                    }
+                });
+            }
+            Command::ImportSharingKey {
+                conn_id,
+                seed,
+                label,
+            } => {
+                let emitter = emitter.clone();
+                let db_path = db_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        import_sharing_key(&emitter, &db_path, conn_id, seed, label).await
+                    {
+                        emitter.error(format!("Import failed: {e:#}"));
+                    }
+                });
+            }
+            Command::ForgetSharingKey {
+                conn_id,
+                public_key,
+            } => {
+                let emitter = emitter.clone();
+                let db_path = db_path.clone();
+                tokio::spawn(async move {
+                    let forget = Store::open(&db_path)
+                        .and_then(|s| s.delete_imported_key(conn_id, &public_key));
+                    match forget {
+                        Ok(()) => {
+                            emitter.status(format!("Forgot sharing key {public_key}"));
+                            if let Err(e) = emit_imported_keys(&emitter, &db_path, conn_id).await {
+                                emitter.error(format!("Imported keys refresh failed: {e:#}"));
+                            }
+                        }
+                        Err(e) => emitter.error(format!("Forgetting the key failed: {e:#}")),
+                    }
+                });
             }
             Command::ShareObject {
                 conn_id,
@@ -1239,9 +1403,78 @@ impl DownloadSource {
     }
 }
 
+/// Connects to a connection's indexer as the holder of `key_seed`. Uses the
+/// connection only for its URL: the sharing key is the whole credential, so
+/// this works for keys the account doesn't own and even when its own app key
+/// is no longer authenticated.
+async fn shared_sdk(db_path: &std::path::Path, conn_id: i64, key_seed: &str) -> Result<SharedSdk> {
+    let indexer_url = Store::open(db_path)?
+        .indexer_url(conn_id)?
+        .context("connection no longer exists")?;
+    let key = parse_sharing_key(key_seed)?;
+    SharedSdk::connect(indexer_url, key.export())
+        .await
+        .context("connecting with the sharing key")
+}
+
+/// Checks a pasted sharing key against the connection's indexer, then records
+/// it. The check is what makes a typo or a revoked key fail loudly here rather
+/// than later, and it fills in the key's stats.
+async fn import_sharing_key(
+    emitter: &Emitter,
+    db_path: &std::path::Path,
+    conn_id: i64,
+    seed: String,
+    label: String,
+) -> Result<()> {
+    let key = parse_sharing_key(&seed)?;
+    let public_key = key.public_key().to_string();
+    // Normalized, so the same key pasted in a different case is one row.
+    let seed = Hash256::from(key.export()).to_string();
+    let sdk = shared_sdk(db_path, conn_id, &seed).await?;
+    let stats = sdk.stats().await.context("reading the key's stats")?;
+
+    Store::open(db_path)?.upsert_imported_key(conn_id, &public_key, &seed, &label)?;
+    emitter.status(format!(
+        "Imported sharing key {public_key} ({} objects)",
+        stats.object_count
+    ));
+    emit_imported_keys(emitter, db_path, conn_id).await
+}
+
+/// Reads the connection's imported keys and refreshes each one's stats from the
+/// indexer. A key the indexer won't serve is still reported, marked unavailable,
+/// so it can be inspected or forgotten.
+async fn emit_imported_keys(
+    emitter: &Emitter,
+    db_path: &std::path::Path,
+    conn_id: i64,
+) -> Result<()> {
+    let rows = Store::open(db_path)?.imported_keys(conn_id)?;
+    let mut keys = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let stats = match shared_sdk(db_path, conn_id, &row.seed).await {
+            Ok(sdk) => match sdk.stats().await {
+                Ok(stats) => Some(stats),
+                Err(e) => {
+                    log::warn!("stats for imported key {}: {e:#}", row.public_key);
+                    None
+                }
+            },
+            Err(e) => {
+                log::warn!("imported key {}: {e:#}", row.public_key);
+                None
+            }
+        };
+        keys.push(imported_key_info(row, stats));
+    }
+    log::debug!("connection {conn_id}: {} imported sharing keys", keys.len());
+    emitter.send(Event::ImportedKeys { conn_id, keys });
+    Ok(())
+}
+
 /// Connects as the holder of `key_seed` and downloads one of the objects that
-/// key grants access to. Uses the connection only for its indexer URL: the
-/// sharing key is the whole credential.
+/// key grants access to.
 async fn download_shared_object(
     emitter: &Emitter,
     db_path: &std::path::Path,
@@ -1250,14 +1483,8 @@ async fn download_shared_object(
     object_id: String,
     dest: PathBuf,
 ) -> Result<()> {
-    let indexer_url = Store::open(db_path)?
-        .indexer_url(conn_id)?
-        .context("connection no longer exists")?;
-    let key = parse_sharing_key(&key_seed)?;
-    let public_key = key.public_key().to_string();
-    let sdk = SharedSdk::connect(indexer_url, key.export())
-        .await
-        .context("connecting with the sharing key")?;
+    let public_key = parse_sharing_key(&key_seed)?.public_key().to_string();
+    let sdk = shared_sdk(db_path, conn_id, &key_seed).await?;
     download_object(
         emitter,
         DownloadSource::Shared { sdk, public_key },
