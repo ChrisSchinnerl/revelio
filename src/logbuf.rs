@@ -87,12 +87,15 @@ impl Log for Logger {
     }
 }
 
-/// Installs the logger, honouring `RUST_LOG` as before, and returns the buffer
-/// the Logs panel reads from.
+/// Installs the logger and returns the buffer the Logs panel reads from.
+/// `RUST_LOG` still wins; the default captures revelio's own debug records so
+/// the panel shows every operation out of the box.
 pub fn init() -> LogBuffer {
-    let inner = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Stdout)
-        .build();
+    let inner = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,revelio=debug"),
+    )
+    .target(env_logger::Target::Stdout)
+    .build();
     let buf = LogBuffer::default();
     log::set_max_level(inner.filter());
     let logger = Logger {

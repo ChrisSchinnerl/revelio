@@ -24,10 +24,12 @@ Run it with the following command (reqires a recent Rust toolchain):
 cargo run --release
 ```
 
-Logs go to **stdout**; control verbosity with `RUST_LOG`:
+Logs go to **stdout** and to the in-app **Logs** panel (toggled in the top
+bar), which filters by level and text. By default revelio's own records are
+captured at debug level; control verbosity with `RUST_LOG`:
 
 ```sh
-RUST_LOG=info,revelio=debug,sia_storage=info cargo run --release
+RUST_LOG=info,revelio=debug,sia_storage=debug cargo run --release
 ```
 
 ## Persistence

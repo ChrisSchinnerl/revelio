@@ -460,10 +460,9 @@ async fn fetch_shared_objects(sdk: &Sdk, key: &SharingKey) -> Result<Vec<SharedO
 
 /// Pushes a connection's sharing keys to the UI.
 async fn emit_sharing_keys(emitter: &Emitter, sdk: &Sdk, conn_id: i64) -> Result<()> {
-    emitter.send(Event::SharingKeys {
-        conn_id,
-        keys: fetch_sharing_keys(sdk).await?,
-    });
+    let keys = fetch_sharing_keys(sdk).await?;
+    log::debug!("connection {conn_id}: {} sharing keys", keys.len());
+    emitter.send(Event::SharingKeys { conn_id, keys });
     Ok(())
 }
 
@@ -474,10 +473,16 @@ async fn emit_shared_objects(
     conn_id: i64,
     key: &SharingKey,
 ) -> Result<()> {
+    let objects = fetch_shared_objects(sdk, key).await?;
+    let public_key = key.public_key().to_string();
+    log::debug!(
+        "sharing key {public_key}: {} attached objects",
+        objects.len()
+    );
     emitter.send(Event::SharedObjects {
         conn_id,
-        public_key: key.public_key().to_string(),
-        objects: fetch_shared_objects(sdk, key).await?,
+        public_key,
+        objects,
     });
     Ok(())
 }
@@ -621,12 +626,19 @@ impl Emitter {
         self.ctx.request_repaint();
     }
 
+    /// Sets the UI's status line. Also logged, so the Logs panel carries
+    /// everything the UI is told.
     fn status(&self, msg: impl Into<String>) {
-        self.send(Event::Status(msg.into()));
+        let msg = msg.into();
+        log::info!("{msg}");
+        self.send(Event::Status(msg));
     }
 
+    /// Shows an error in the UI, and logs it.
     fn error(&self, msg: impl Into<String>) {
-        self.send(Event::Error(msg.into()));
+        let msg = msg.into();
+        log::error!("{msg}");
+        self.send(Event::Error(msg));
     }
 
     fn account(&self, id: i64, account: &Account) {
@@ -660,7 +672,6 @@ where
             return;
         };
         if let Err(e) = op(sdk, emitter.clone()).await {
-            log::error!("{label} failed: {e:#}");
             emitter.error(format!("{label} failed: {e:#}"));
         }
     });
@@ -722,7 +733,6 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     )
                     .await
                     {
-                        log::error!("connect failed: {e:#}");
                         emitter.error(format!("Connect failed: {e:#}"));
                     }
                 });
@@ -737,7 +747,6 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                         emitter.send(Event::ConnectionRemoved { id });
                     }
                     Err(e) => {
-                        log::error!("failed to remove connection {id}: {e:#}");
                         emitter.error(format!("Failed to remove connection: {e:#}"));
                     }
                 }
@@ -785,7 +794,6 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     )
                     .await
                     {
-                        log::error!("Shared download failed: {e:#}");
                         emitter.error(format!("Shared download failed: {e:#}"));
                     }
                 });
@@ -798,6 +806,7 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     "Account refresh",
                     move |sdk, emitter| async move {
                         let account = sdk.account().await.context("fetching account")?;
+                        log::debug!("connection {conn_id}: refreshed account");
                         emitter.account(conn_id, &account);
                         Ok(())
                     },
@@ -811,6 +820,7 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     "Hosts refresh",
                     move |sdk, emitter| async move {
                         let hosts = fetch_host_infos(&sdk).await?;
+                        log::debug!("connection {conn_id}: {} usable hosts", hosts.len());
                         emitter.send(Event::Hosts { id: conn_id, hosts });
                         Ok(())
                     },
@@ -822,7 +832,13 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                 let usd_rate = usd_rate.clone();
                 tokio::spawn(async move {
                     let detail = match fetch_host_detail(&http, &usd_rate, &public_key).await {
-                        Ok(d) => d,
+                        Ok(d) => {
+                            log::debug!(
+                                "siascan host detail for {public_key}: {}",
+                                if d.is_some() { "found" } else { "no record" }
+                            );
+                            d
+                        }
                         Err(e) => {
                             log::warn!("siascan host detail for {public_key} failed: {e:#}");
                             None
@@ -847,13 +863,15 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                 let db_path = db_path.clone();
                 tokio::spawn(async move {
                     match Store::open(&db_path).and_then(|s| s.object_slabs(conn_id, &object_id)) {
-                        Ok(rows) => emitter.send(Event::ObjectStructure {
-                            conn_id,
-                            object_id,
-                            slabs: rows.into_iter().map(SlabView::from).collect(),
-                        }),
+                        Ok(rows) => {
+                            log::debug!("object {object_id}: loaded {} slabs", rows.len());
+                            emitter.send(Event::ObjectStructure {
+                                conn_id,
+                                object_id,
+                                slabs: rows.into_iter().map(SlabView::from).collect(),
+                            });
+                        }
                         Err(e) => {
-                            log::error!("loading object structure failed: {e:#}");
                             emitter.error(format!("Loading object structure failed: {e:#}"));
                         }
                     }
@@ -866,13 +884,18 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                     match Store::open(&db_path)
                         .and_then(|s| s.objects_with_component(conn_id, &query))
                     {
-                        Ok(object_ids) => emitter.send(Event::ComponentMatches {
-                            conn_id,
-                            query,
-                            object_ids,
-                        }),
+                        Ok(object_ids) => {
+                            log::debug!(
+                                "component search {query:?} matched {} objects",
+                                object_ids.len()
+                            );
+                            emitter.send(Event::ComponentMatches {
+                                conn_id,
+                                query,
+                                object_ids,
+                            });
+                        }
                         Err(e) => {
-                            log::error!("component search failed: {e:#}");
                             emitter.error(format!("Component search failed: {e:#}"));
                         }
                     }
@@ -991,12 +1014,17 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                 let db_path = db_path.clone();
                 tokio::spawn(async move {
                     match Store::open(&db_path).and_then(|s| s.stats(conn_id)) {
-                        Ok(stats) => emitter.send(Event::Stats {
-                            conn_id,
-                            stats: stats.into(),
-                        }),
+                        Ok(stats) => {
+                            log::debug!(
+                                "connection {conn_id}: stats over {} objects",
+                                stats.object_count
+                            );
+                            emitter.send(Event::Stats {
+                                conn_id,
+                                stats: stats.into(),
+                            });
+                        }
                         Err(e) => {
-                            log::error!("stats failed: {e:#}");
                             emitter.error(format!("Stats failed: {e:#}"));
                         }
                     }
@@ -1113,18 +1141,19 @@ async fn upload_object(
 
     match result {
         Ok(object_id) => {
-            emit(
-                total,
-                true,
-                Some(object_id.clone()),
-                None,
-                Some(started.elapsed().as_secs_f64()),
-            );
-            emitter.status(format!("Uploaded {name} ({object_id})"));
+            let elapsed = started.elapsed().as_secs_f64();
+            emit(total, true, Some(object_id.clone()), None, Some(elapsed));
+            // Logged through the status line, so it isn't reported twice.
+            emitter.status(format!(
+                "Uploaded {name} ({size} bytes in {elapsed:.1}s) as {object_id}"
+            ));
         }
         // Report failures through the upload window so the entry shows the
         // error instead of vanishing.
-        Err(e) => emit(0, false, None, Some(format!("{e:#}")), None),
+        Err(e) => {
+            log::error!("upload of {name} failed: {e:#}");
+            emit(0, false, None, Some(format!("{e:#}")), None);
+        }
     }
     Ok(())
 }
@@ -1266,6 +1295,10 @@ async fn download_object(
     };
 
     let started = std::time::Instant::now();
+    match &via_key {
+        Some(pk) => log::info!("downloading {object_id} to {dest_str} via sharing key {pk}"),
+        None => log::info!("downloading {object_id} to {dest_str}"),
+    }
     let result = async {
         let key: Hash256 = object_id.parse().context("invalid object id")?;
         let (total, mut reader) = source.open(&key).await?;
@@ -1297,15 +1330,15 @@ async fn download_object(
     .await;
 
     match result {
-        Ok((written, total)) => update(
-            written,
-            total,
-            true,
-            None,
-            Some(started.elapsed().as_secs_f64()),
-            0,
-        ),
-        Err(e) => update(0, 0, false, Some(format!("{e:#}")), None, 0),
+        Ok((written, total)) => {
+            let elapsed = started.elapsed().as_secs_f64();
+            log::info!("downloaded {object_id}: {written} bytes in {elapsed:.1}s to {dest_str}");
+            update(written, total, true, None, Some(elapsed), 0);
+        }
+        Err(e) => {
+            log::error!("download of {object_id} failed: {e:#}");
+            update(0, 0, false, Some(format!("{e:#}")), None, 0);
+        }
     }
     Ok(())
 }
