@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sia_storage::{
-    Account, AppKey, Builder, DownloadOptions, Hash256, Host, HostQuery, Object, Sdk,
-    ShardProgress, UploadOptions, Utc,
+    Account, AppApiError, AppKey, Builder, DateTime, Download, DownloadOptions, Hash256, Host,
+    HostQuery, KeyRecord, Object, Sdk, ShardProgress, SharedSdk, SharingError, SharingKey,
+    SharingKeyOptions, UploadOptions, Utc,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -59,6 +60,14 @@ pub enum Command {
         object_id: String,
         dest: PathBuf,
     },
+    /// Download an object attached to a sharing key the way a recipient would:
+    /// through an SDK built from the key itself, not the account's app key.
+    DownloadSharedObject {
+        conn_id: i64,
+        key_seed: String,
+        object_id: String,
+        dest: PathBuf,
+    },
     /// Re-fetch account limits/usage for a connection.
     RefreshAccount { conn_id: i64 },
     /// Re-fetch the usable host list for a connection.
@@ -77,6 +86,30 @@ pub enum Command {
     FindObjectsByComponent { conn_id: i64, query: String },
     /// Compute aggregate stats for a connection (Data tab).
     FetchStats { conn_id: i64 },
+    /// List the account's sharing keys.
+    FetchSharingKeys { conn_id: i64 },
+    /// Create a sharing key, expiring `expires_in_secs` from now if set.
+    CreateSharingKey {
+        conn_id: i64,
+        description: String,
+        expires_in_secs: Option<i64>,
+    },
+    /// Delete a sharing key and every object attached to it.
+    RevokeSharingKey { conn_id: i64, key_seed: String },
+    /// List the objects attached to a sharing key.
+    FetchSharedObjects { conn_id: i64, key_seed: String },
+    /// Attach an object to a sharing key, re-sealing its keys for recipients.
+    ShareObject {
+        conn_id: i64,
+        key_seed: String,
+        object_id: String,
+    },
+    /// Detach an object from a sharing key.
+    UnshareObject {
+        conn_id: i64,
+        key_seed: String,
+        object_id: String,
+    },
 }
 
 /// Events sent from the backend to the UI.
@@ -131,6 +164,17 @@ pub enum Event {
     Stats {
         conn_id: i64,
         stats: StatsInfo,
+    },
+    /// The account's sharing keys (FetchSharingKeys).
+    SharingKeys {
+        conn_id: i64,
+        keys: Vec<SharingKeyInfo>,
+    },
+    /// The objects attached to one sharing key (FetchSharedObjects).
+    SharedObjects {
+        conn_id: i64,
+        public_key: String,
+        objects: Vec<SharedObjectInfo>,
     },
     /// A connection was removed.
     ConnectionRemoved {
@@ -311,6 +355,133 @@ async fn fetch_host_infos(sdk: &Sdk) -> Result<Vec<HostInfo>> {
     Ok(hosts)
 }
 
+/// One of an account's sharing keys, for the Sharing tab.
+#[derive(Clone)]
+pub struct SharingKeyInfo {
+    pub public_key: String,
+    /// The key's exported seed (hex): the whole credential a recipient needs.
+    pub seed: String,
+    pub description: String,
+    pub object_count: u64,
+    pub object_size: u64,
+    pub pinned_data: u64,
+    pub pinned_size: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// An object attached to a sharing key, as the indexer reports it.
+#[derive(Clone)]
+pub struct SharedObjectInfo {
+    pub id: String,
+    pub size: u64,
+    pub slabs: u64,
+    pub metadata: Vec<u8>,
+}
+
+fn sharing_key_info(r: &KeyRecord) -> SharingKeyInfo {
+    SharingKeyInfo {
+        public_key: r.key.public_key().to_string(),
+        seed: Hash256::from(r.key.export()).to_string(),
+        description: r.description.clone(),
+        object_count: r.stats.object_count,
+        object_size: r.stats.object_size,
+        pinned_data: r.stats.pinned_data,
+        pinned_size: r.stats.pinned_size,
+        created_at: r.stats.created_at.to_rfc3339(),
+        updated_at: r.stats.updated_at.to_rfc3339(),
+        expires_at: r.stats.expires_at.map(|t| t.to_rfc3339()),
+    }
+}
+
+fn shared_object_info(o: &Object) -> SharedObjectInfo {
+    SharedObjectInfo {
+        id: o.id().to_string(),
+        size: o.size(),
+        slabs: o.slabs().len() as u64,
+        metadata: o.metadata.clone(),
+    }
+}
+
+/// Rebuilds a sharing key from the hex seed the UI holds.
+fn parse_sharing_key(seed: &str) -> Result<SharingKey> {
+    let seed: Hash256 = seed.parse().context("invalid sharing key")?;
+    Ok(SharingKey::import(seed.into()))
+}
+
+/// Explains a failed sharing key listing. The listing returns an empty array
+/// for an account without keys, so a 404 means the indexer has no `/sharing`
+/// route at all — it predates sharing keys.
+fn list_keys_error(e: SharingError) -> anyhow::Error {
+    if let SharingError::Api(AppApiError::Api(status, _)) = &e
+        && status.as_u16() == 404
+    {
+        return anyhow::anyhow!("this indexer does not support sharing keys");
+    }
+    anyhow::Error::new(e).context("fetching sharing keys")
+}
+
+/// Fetches all of an account's sharing keys, paging through the indexer.
+async fn fetch_sharing_keys(sdk: &Sdk) -> Result<Vec<SharingKeyInfo>> {
+    const PAGE: u64 = 100;
+    let mut keys = Vec::new();
+    for offset in (0..).step_by(PAGE as usize) {
+        let page = sdk
+            .sharing_keys(Some(offset), Some(PAGE))
+            .await
+            .map_err(list_keys_error)?;
+        let done = page.len() < PAGE as usize;
+        keys.extend(page.iter().map(sharing_key_info));
+        if done {
+            break;
+        }
+    }
+    Ok(keys)
+}
+
+/// Fetches every object attached to `key`, paging through the indexer.
+async fn fetch_shared_objects(sdk: &Sdk, key: &SharingKey) -> Result<Vec<SharedObjectInfo>> {
+    const PAGE: u64 = 100;
+    let mut objects = Vec::new();
+    for offset in (0..).step_by(PAGE as usize) {
+        let page = sdk
+            .shared_objects(key, Some(offset), Some(PAGE))
+            .await
+            .context("fetching shared objects")?;
+        let done = page.len() < PAGE as usize;
+        objects.extend(page.iter().map(shared_object_info));
+        if done {
+            break;
+        }
+    }
+    Ok(objects)
+}
+
+/// Pushes a connection's sharing keys to the UI.
+async fn emit_sharing_keys(emitter: &Emitter, sdk: &Sdk, conn_id: i64) -> Result<()> {
+    emitter.send(Event::SharingKeys {
+        conn_id,
+        keys: fetch_sharing_keys(sdk).await?,
+    });
+    Ok(())
+}
+
+/// Pushes the objects attached to `key` to the UI.
+async fn emit_shared_objects(
+    emitter: &Emitter,
+    sdk: &Sdk,
+    conn_id: i64,
+    key: &SharingKey,
+) -> Result<()> {
+    emitter.send(Event::SharedObjects {
+        conn_id,
+        public_key: key.public_key().to_string(),
+        objects: fetch_shared_objects(sdk, key).await?,
+    });
+    Ok(())
+}
+
 /// Progress (or final state) of an object download, for the download window.
 #[derive(Clone)]
 pub struct DownloadProgress {
@@ -322,6 +493,9 @@ pub struct DownloadProgress {
     pub error: Option<String>,
     /// Wall-clock seconds the download took; set only on the final `done` event.
     pub elapsed_secs: Option<f64>,
+    /// The sharing key this download authenticated with, if it wasn't the
+    /// account's own app key.
+    pub via_key: Option<String>,
 }
 
 /// Progress/result of an object upload, for the uploads window.
@@ -591,7 +765,26 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
             } => {
                 let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
                 spawn_conn_op(&emitter, sdk, "Download", move |sdk, emitter| async move {
-                    download_object(&emitter, sdk, object_id, dest).await
+                    download_object(&emitter, DownloadSource::Owner(sdk), object_id, dest).await
+                });
+            }
+            Command::DownloadSharedObject {
+                conn_id,
+                key_seed,
+                object_id,
+                dest,
+            } => {
+                let emitter = emitter.clone();
+                let db_path = db_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = download_shared_object(
+                        &emitter, &db_path, conn_id, key_seed, object_id, dest,
+                    )
+                    .await
+                    {
+                        log::error!("Shared download failed: {e:#}");
+                        emitter.error(format!("Shared download failed: {e:#}"));
+                    }
                 });
             }
             Command::RefreshAccount { conn_id } => {
@@ -680,6 +873,114 @@ async fn run(mut cmd_rx: UnboundedReceiver<Command>, emitter: Emitter, db_path: 
                             emitter.error(format!("Component search failed: {e:#}"));
                         }
                     }
+                });
+            }
+            Command::FetchSharingKeys { conn_id } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(
+                    &emitter,
+                    sdk,
+                    "Sharing keys refresh",
+                    move |sdk, emitter| async move { emit_sharing_keys(&emitter, &sdk, conn_id).await },
+                );
+            }
+            Command::CreateSharingKey {
+                conn_id,
+                description,
+                expires_in_secs,
+            } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(
+                    &emitter,
+                    sdk,
+                    "Sharing key creation",
+                    move |sdk, emitter| async move {
+                        // The delay is turned into an absolute expiry here so the
+                        // UI doesn't need a clock.
+                        let expires_at = match expires_in_secs {
+                            Some(secs) => Some(
+                                Utc::now()
+                                    .timestamp()
+                                    .checked_add(secs)
+                                    .and_then(|t| DateTime::from_timestamp(t, 0))
+                                    .context("expiry is out of range")?,
+                            ),
+                            None => None,
+                        };
+                        let key = sdk
+                            .create_sharing_key(SharingKeyOptions {
+                                description: description.clone(),
+                                expires_at,
+                            })
+                            .await
+                            .context("creating sharing key")?;
+                        emitter.status(format!("Created sharing key {}", key.public_key()));
+                        emit_sharing_keys(&emitter, &sdk, conn_id).await
+                    },
+                );
+            }
+            Command::RevokeSharingKey { conn_id, key_seed } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(
+                    &emitter,
+                    sdk,
+                    "Sharing key revocation",
+                    move |sdk, emitter| async move {
+                        let key = parse_sharing_key(&key_seed)?;
+                        sdk.revoke_sharing_key(&key)
+                            .await
+                            .context("revoking sharing key")?;
+                        emitter.status(format!("Revoked sharing key {}", key.public_key()));
+                        emit_sharing_keys(&emitter, &sdk, conn_id).await
+                    },
+                );
+            }
+            Command::FetchSharedObjects { conn_id, key_seed } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(
+                    &emitter,
+                    sdk,
+                    "Shared objects refresh",
+                    move |sdk, emitter| async move {
+                        let key = parse_sharing_key(&key_seed)?;
+                        emit_shared_objects(&emitter, &sdk, conn_id, &key).await
+                    },
+                );
+            }
+            Command::ShareObject {
+                conn_id,
+                key_seed,
+                object_id,
+            } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(&emitter, sdk, "Attach", move |sdk, emitter| async move {
+                    let key = parse_sharing_key(&key_seed)?;
+                    let id: Hash256 = object_id.parse().context("invalid object id")?;
+                    let object = sdk.object(&id).await.context("fetching object")?;
+                    sdk.share_object(&key, &object)
+                        .await
+                        .context("attaching object")?;
+                    emitter.status(format!("Attached {object_id}"));
+                    // Both the attachment list and the key's stats changed.
+                    emit_shared_objects(&emitter, &sdk, conn_id, &key).await?;
+                    emit_sharing_keys(&emitter, &sdk, conn_id).await
+                });
+            }
+            Command::UnshareObject {
+                conn_id,
+                key_seed,
+                object_id,
+            } => {
+                let sdk = sdks.lock().unwrap().get(&conn_id).cloned();
+                spawn_conn_op(&emitter, sdk, "Detach", move |sdk, emitter| async move {
+                    let key = parse_sharing_key(&key_seed)?;
+                    let id: Hash256 = object_id.parse().context("invalid object id")?;
+                    sdk.unshare_object(&key, &id)
+                        .await
+                        .context("detaching object")?;
+                    emitter.status(format!("Detached {object_id}"));
+                    emit_shared_objects(&emitter, &sdk, conn_id, &key).await?;
+                    emit_sharing_keys(&emitter, &sdk, conn_id).await
                 });
             }
             Command::FetchStats { conn_id } => {
@@ -868,18 +1169,85 @@ async fn update_metadata(
     Ok(())
 }
 
+/// Who a download authenticates as: the account that owns the object, or the
+/// holder of a sharing key it is attached to.
+enum DownloadSource {
+    Owner(Sdk),
+    Shared { sdk: SharedSdk, public_key: String },
+}
+
+impl DownloadSource {
+    /// Fetches the object and opens a reader for its data, returning the
+    /// object's size alongside it.
+    async fn open(&self, id: &Hash256) -> Result<(u64, Download)> {
+        let (object, reader) = match self {
+            DownloadSource::Owner(sdk) => {
+                let object = sdk.object(id).await.context("fetching object")?;
+                let reader = sdk
+                    .download(&object, DownloadOptions::default())
+                    .context("starting download")?;
+                (object, reader)
+            }
+            DownloadSource::Shared { sdk, .. } => {
+                let object = sdk.object(id).await.context("fetching shared object")?;
+                let reader = sdk
+                    .download(&object, DownloadOptions::default())
+                    .context("starting download")?;
+                (object, reader)
+            }
+        };
+        Ok((object.size(), reader))
+    }
+
+    fn public_key(&self) -> Option<String> {
+        match self {
+            DownloadSource::Owner(_) => None,
+            DownloadSource::Shared { public_key, .. } => Some(public_key.clone()),
+        }
+    }
+}
+
+/// Connects as the holder of `key_seed` and downloads one of the objects that
+/// key grants access to. Uses the connection only for its indexer URL: the
+/// sharing key is the whole credential.
+async fn download_shared_object(
+    emitter: &Emitter,
+    db_path: &std::path::Path,
+    conn_id: i64,
+    key_seed: String,
+    object_id: String,
+    dest: PathBuf,
+) -> Result<()> {
+    let indexer_url = Store::open(db_path)?
+        .indexer_url(conn_id)?
+        .context("connection no longer exists")?;
+    let key = parse_sharing_key(&key_seed)?;
+    let public_key = key.public_key().to_string();
+    let sdk = SharedSdk::connect(indexer_url, key.export())
+        .await
+        .context("connecting with the sharing key")?;
+    download_object(
+        emitter,
+        DownloadSource::Shared { sdk, public_key },
+        object_id,
+        dest,
+    )
+    .await
+}
+
 /// Fetches and decrypts an object, streaming it to `dest` while emitting
 /// progress. Failures are reported via a [`Download`](Event::Download) update
 /// (so the download window shows them), hence this always returns `Ok`.
 async fn download_object(
     emitter: &Emitter,
-    sdk: Sdk,
+    source: DownloadSource,
     object_id: String,
     dest: PathBuf,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let dest_str = dest.display().to_string();
+    let via_key = source.public_key();
     let update = |written, total, done, error, elapsed_secs| {
         emitter.send(Event::Download(DownloadProgress {
             object_id: object_id.clone(),
@@ -889,19 +1257,16 @@ async fn download_object(
             done,
             error,
             elapsed_secs,
+            via_key: via_key.clone(),
         }));
     };
 
     let started = std::time::Instant::now();
     let result = async {
         let key: Hash256 = object_id.parse().context("invalid object id")?;
-        let object = sdk.object(&key).await.context("fetching object")?;
-        let total = object.size();
+        let (total, mut reader) = source.open(&key).await?;
         update(0, total, false, None, None);
 
-        let mut reader = sdk
-            .download(&object, DownloadOptions::default())
-            .context("starting download")?;
         let mut file = tokio::fs::File::create(&dest)
             .await
             .with_context(|| format!("creating {}", dest.display()))?;

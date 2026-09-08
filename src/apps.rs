@@ -26,6 +26,12 @@ pub const KNOWN_APPS: &[KnownApp] = &[
         name: "sia mobile",
         app_id: "ac38d91cfb250d50820a0c658628662b8c2dcfc6a5f3fe4d5755eb0a7b67eeac",
     },
+    KnownApp {
+        // The SDK's benchmark example (sia-sdk-rs `examples/benchmark.rs`); it
+        // keeps its app key per profile in `tech.Sia.sia-benchmark/config.toml`.
+        name: "benchmark",
+        app_id: "5c0b1af28e6ac76395b2087ea987297b9c496f90d2ab3e3d3d07980ae4c43633",
+    },
 ];
 
 /// Returns the display name for a known app id (hex), if recognized.

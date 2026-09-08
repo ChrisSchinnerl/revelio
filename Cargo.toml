@@ -10,7 +10,7 @@ rfd = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "fs", "io-util"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
-sia_storage = { version = "0.11.0" }
+sia_storage = { git = "https://github.com/SiaFoundation/sia-sdk-rs", branch = "master" }
 directories = "6"
 serde_json = "1"
 anyhow = "1"

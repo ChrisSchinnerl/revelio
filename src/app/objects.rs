@@ -1136,7 +1136,7 @@ fn highlight_job(
 
 /// A compact single-line preview of metadata bytes for the table cell: valid
 /// UTF-8 shown inline (whitespace collapsed, truncated), else a byte-count marker.
-fn metadata_preview(bytes: &[u8]) -> String {
+pub(crate) fn metadata_preview(bytes: &[u8]) -> String {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return format!("<{} bytes>", bytes.len());
     };
@@ -1190,10 +1190,12 @@ fn parse_hex_edit(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     digits
-        .chunks_exact(2)
-        .map(|pair| {
-            let hi = (pair[0] as char).to_digit(16)?;
-            let lo = (pair[1] as char).to_digit(16)?;
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[hi, lo]| {
+            let hi = (*hi as char).to_digit(16)?;
+            let lo = (*lo as char).to_digit(16)?;
             Some((hi * 16 + lo) as u8)
         })
         .collect()

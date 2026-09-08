@@ -9,25 +9,28 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::apps::{KNOWN_APPS, app_name_for};
 use crate::backend::{
-    self, AccountInfo, Command, DownloadProgress, Event, HostInfo, ObjectView, SlabView, StatsInfo,
-    UploadProgress,
+    self, AccountInfo, Command, DownloadProgress, Event, HostInfo, ObjectView, SharedObjectInfo,
+    SharingKeyInfo, SlabView, StatsInfo, UploadProgress,
 };
 
 mod data;
 mod format;
 mod hosts;
 mod objects;
+mod sharing;
 mod transfers;
 
 use format::*;
 use hosts::*;
 use objects::*;
+use sharing::*;
 
 /// Which tab of the selected connection is shown in the central panel.
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Tab {
     #[default]
     Objects,
+    Sharing,
     Hosts,
     Data,
 }
@@ -49,6 +52,11 @@ struct ConnState {
     stats_refreshed: Option<Instant>,
     /// A stats fetch is in flight (dedupes the auto-fetch on tab open).
     stats_pending: bool,
+    /// The account's sharing keys, cached with its refresh time.
+    sharing_keys: Option<Vec<SharingKeyInfo>>,
+    sharing_refreshed: Option<Instant>,
+    /// A sharing key fetch is in flight (dedupes the auto-fetch on tab open).
+    sharing_pending: bool,
 }
 
 pub struct App {
@@ -109,6 +117,19 @@ pub struct App {
     map_vx: f32,
     map_vy: f32,
     host_details: HashMap<String, HostDetail>,
+    /// The sharing key selected in the Sharing tab (by public key).
+    selected_key: Option<String>,
+    /// Objects attached to a sharing key, by (connection id, public key).
+    shared_objects: HashMap<(i64, String), Vec<SharedObjectInfo>>,
+    /// Keys whose attachment list was requested but hasn't arrived (dedup).
+    shared_pending: HashSet<(i64, String)>,
+    create_key: Option<CreateKeyDialog>,
+    attach_dialog: Option<AttachDialog>,
+    /// A key awaiting revoke confirmation: (connection id, seed, description).
+    pending_key_revoke: Option<(i64, String, String)>,
+    /// A shared-key download awaiting its save dialog: (connection id, key
+    /// seed, object id). The dialog is opened after the panels are drawn.
+    shared_download: Option<(i64, String, String)>,
     downloads: HashMap<String, DownloadProgress>,
     /// In-flight/finished uploads, keyed by their UI-assigned id.
     uploads: HashMap<u64, UploadProgress>,
@@ -202,6 +223,13 @@ impl App {
             map_vx: 0.0,
             map_vy: 0.0,
             host_details: HashMap::new(),
+            selected_key: None,
+            shared_objects: HashMap::new(),
+            shared_pending: HashSet::new(),
+            create_key: None,
+            attach_dialog: None,
+            pending_key_revoke: None,
+            shared_download: None,
             downloads: HashMap::new(),
             uploads: HashMap::new(),
             upload_seq: 0,
@@ -250,6 +278,9 @@ impl App {
                             stats: None,
                             stats_refreshed: None,
                             stats_pending: false,
+                            sharing_keys: None,
+                            sharing_refreshed: None,
+                            sharing_pending: false,
                         });
                     }
                     if self.selected.is_none() {
@@ -275,6 +306,22 @@ impl App {
                         conn.stats_pending = false;
                     }
                 }
+                Event::SharingKeys { conn_id, keys } => {
+                    if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+                        conn.sharing_keys = Some(keys);
+                        conn.sharing_refreshed = Some(Instant::now());
+                        conn.sharing_pending = false;
+                    }
+                }
+                Event::SharedObjects {
+                    conn_id,
+                    public_key,
+                    objects,
+                } => {
+                    let key = (conn_id, public_key);
+                    self.shared_pending.remove(&key);
+                    self.shared_objects.insert(key, objects);
+                }
                 Event::HostDetail { public_key, detail } => {
                     let state = match detail {
                         Some(info) => HostDetail::Ready(Box::new(info)),
@@ -283,7 +330,9 @@ impl App {
                     self.host_details.insert(public_key, state);
                 }
                 Event::Download(p) => {
-                    self.downloads.insert(p.object_id.clone(), p);
+                    // Keyed by destination: the same object downloaded as its
+                    // owner and via a sharing key are separate transfers.
+                    self.downloads.insert(p.dest.clone(), p);
                 }
                 Event::Upload(p) => {
                     self.uploads.insert(p.upload_id, p);
@@ -532,13 +581,15 @@ impl App {
 }
 
 /// Modal confirmation: `Some(true)` confirmed, `Some(false)` cancelled, `None`
-/// while open. `code` is shown on its own monospace line (e.g. an object id).
+/// while open. `code` is shown on its own monospace line (e.g. an object id),
+/// and `confirm` labels the confirming button.
 fn confirm_modal(
     ctx: &egui::Context,
     title: &str,
     message: &str,
     code: Option<&str>,
     detail: &str,
+    confirm: &str,
 ) -> Option<bool> {
     let mut result = None;
     egui::Window::new(title)
@@ -552,7 +603,7 @@ fn confirm_modal(
             ui.small(detail);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
+                if ui.button(confirm).clicked() {
                     result = Some(true);
                 }
                 if ui.button("Cancel").clicked() {
@@ -612,6 +663,7 @@ impl eframe::App for App {
                 None,
                 "Removes locally synced objects for this connection. \
                  Your indexer account is not affected.",
+                "Delete",
             ) {
                 Some(true) => {
                     let _ = self.cmd_tx.send(Command::RemoveConnection { id });
@@ -808,6 +860,11 @@ impl eframe::App for App {
                 );
                 ui.selectable_value(
                     &mut self.tab,
+                    Tab::Sharing,
+                    egui::RichText::new("Sharing").size(16.0),
+                );
+                ui.selectable_value(
+                    &mut self.tab,
                     Tab::Hosts,
                     egui::RichText::new("Hosts").size(16.0),
                 );
@@ -821,6 +878,10 @@ impl eframe::App for App {
 
             if self.tab == Tab::Hosts {
                 self.hosts_view(ui, cidx);
+                return;
+            }
+            if self.tab == Tab::Sharing {
+                self.sharing_view(ui, cidx);
                 return;
             }
             if self.tab == Tab::Data {
@@ -1072,6 +1133,7 @@ impl eframe::App for App {
         self.downloads_window(&ctx);
         self.uploads_window(&ctx);
         self.metadata_dialog(&ctx);
+        self.sharing_windows(&ctx);
 
         if let Some((conn_id, object_id)) = self.pending_object_delete.clone() {
             match confirm_modal(
@@ -1080,6 +1142,7 @@ impl eframe::App for App {
                 "Delete this object?",
                 Some(&object_id),
                 "Removes it from the indexer. This cannot be undone.",
+                "Delete",
             ) {
                 Some(true) => {
                     let _ = self

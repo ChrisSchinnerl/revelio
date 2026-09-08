@@ -152,7 +152,7 @@ impl App {
 
 /// A small labelled stat card. Its text never wraps, so the card keeps its
 /// natural width and `horizontal_wrapped` moves whole cards to the next row.
-fn card(ui: &mut egui::Ui, label: &str, value: &str) {
+pub(crate) fn card(ui: &mut egui::Ui, label: &str, value: &str) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         ui.vertical(|ui| {

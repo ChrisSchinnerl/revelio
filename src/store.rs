@@ -93,6 +93,18 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The indexer a connection talks to, if the connection still exists.
+    pub fn indexer_url(&self, id: i64) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT indexer_url FROM connections WHERE id = ?1")?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Deletes a connection; its `objects` and `sync_state` rows go with it via
     /// `ON DELETE CASCADE` (enforcement is enabled per-connection in
     /// [`Store::open`]).

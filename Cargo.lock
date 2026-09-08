@@ -143,7 +143,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
 dependencies = [
- "crypto-common 0.2.2",
+ "crypto-common",
  "inout",
 ]
 
@@ -552,15 +552,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "blake2"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
-dependencies = [
- "digest 0.10.7",
-]
-
-[[package]]
 name = "blake2b_simd"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,15 +560,6 @@ dependencies = [
  "arrayref",
  "arrayvec",
  "constant_time_eq",
-]
-
-[[package]]
-name = "block-buffer"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
-dependencies = [
- "generic-array",
 ]
 
 [[package]]
@@ -801,8 +783,8 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
- "block-buffer 0.12.1",
- "crypto-common 0.2.2",
+ "block-buffer",
+ "crypto-common",
  "inout",
 ]
 
@@ -963,16 +945,6 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-common"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
-dependencies = [
- "generic-array",
- "typenum",
-]
-
-[[package]]
-name = "crypto-common"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
@@ -1006,7 +978,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
- "digest 0.11.3",
+ "digest",
  "fiat-crypto",
  "rustc_version",
  "subtle",
@@ -1100,23 +1072,12 @@ dependencies = [
 
 [[package]]
 name = "digest"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
-dependencies = [
- "block-buffer 0.10.4",
- "crypto-common 0.1.7",
- "subtle",
-]
-
-[[package]]
-name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
- "block-buffer 0.12.1",
- "crypto-common 0.2.2",
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -1728,16 +1689,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "generic-array"
-version = "0.14.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
-dependencies = [
- "typenum",
- "version_check",
-]
-
-[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2011,24 +1962,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fda06d18ac606267c40c04e41b9947729bf8b9efe74bd4e82b61a5f26a510b9f"
 dependencies = [
  "arrayvec",
-]
-
-[[package]]
-name = "hkdf"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
-dependencies = [
- "hmac",
-]
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -4189,7 +4122,7 @@ checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "digest 0.11.3",
+ "digest",
 ]
 
 [[package]]
@@ -4201,12 +4134,10 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "sia_core"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9b107a60010b4547ffb011945012f1b143515a811ff5d1b25a9282f5f1501dc"
+source = "git+https://github.com/SiaFoundation/sia-sdk-rs?branch=master#f7e44e398debb51f8f58982364bf25efe84a5373"
 dependencies = [
  "base64 0.23.1",
  "bip39",
- "blake2",
  "blake2b_simd",
  "bytes",
  "chrono",
@@ -4227,19 +4158,17 @@ dependencies = [
 [[package]]
 name = "sia_core_derive"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be79c90e1acc58de1787a54f4bfca36a33be9c6a4b5ac0be98de7eca1ef5926"
+source = "git+https://github.com/SiaFoundation/sia-sdk-rs?branch=master#f7e44e398debb51f8f58982364bf25efe84a5373"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
 name = "sia_mux"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc2ed140d294a2f4e93e87445c6abc738dbba91492aa297fcab9fe26cbd7bea"
+source = "git+https://github.com/SiaFoundation/sia-sdk-rs?branch=master#f7e44e398debb51f8f58982364bf25efe84a5373"
 dependencies = [
  "blake2b_simd",
  "bytes",
@@ -4265,11 +4194,9 @@ dependencies = [
 [[package]]
 name = "sia_storage"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1b727386db43146123f418c259ca9b71dcc4a82f586a9dd61bd2dc8ba577177"
+source = "git+https://github.com/SiaFoundation/sia-sdk-rs?branch=master#f7e44e398debb51f8f58982364bf25efe84a5373"
 dependencies = [
  "base64 0.23.1",
- "blake2",
  "blake2b_simd",
  "bytes",
  "chacha20",
@@ -4278,7 +4205,6 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
- "hkdf",
  "js-sys",
  "log",
  "rand 0.10.2",
@@ -4974,7 +4900,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
 dependencies = [
- "crypto-common 0.2.2",
+ "crypto-common",
  "ctutils",
 ]
 

@@ -11,6 +11,8 @@ SQLite database for inspection.
 - Check what objects an app pins on Sia Storage
 - Download and upload objects
 - Read and edit object metadata
+- Create, inspect and revoke sharing keys, and attach objects to them
+  (needs an indexer with sharing key support)
 - Search and filter objects by id, slab id, sector id, metadata and more
 - Visualize the distribution of uploaded data
 - Check details of usable hosts

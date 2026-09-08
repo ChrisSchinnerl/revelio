@@ -24,6 +24,12 @@ impl App {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or(d.object_id.as_str());
+                    // Downloads through a sharing key are called out, since they
+                    // authenticate as a recipient rather than the owner.
+                    let hover = match &d.via_key {
+                        Some(pk) => format!("{}\nvia sharing key {pk}", d.object_id),
+                        None => d.object_id.clone(),
+                    };
                     let state = if let Some(err) = &d.error {
                         TransferState::Error(err)
                     } else if d.done {
@@ -32,13 +38,17 @@ impl App {
                             detail: Some(&d.dest),
                         }
                     } else {
+                        let sizes = format!("{} / {}", human_size(d.written), human_size(d.total));
                         TransferState::Progress {
                             frac: frac(d.written, d.total),
-                            text: format!("{} / {}", human_size(d.written), human_size(d.total)),
+                            text: match d.via_key {
+                                Some(_) => format!("{sizes} · via sharing key"),
+                                None => sizes,
+                            },
                         }
                     };
-                    if transfer_card(ui, title, &d.object_id, state) {
-                        dismiss.push(d.object_id.clone());
+                    if transfer_card(ui, title, &hover, state) {
+                        dismiss.push(d.dest.clone());
                     }
                 }
             });
