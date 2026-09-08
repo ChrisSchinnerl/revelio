@@ -493,6 +493,9 @@ pub struct DownloadProgress {
     pub error: Option<String>,
     /// Wall-clock seconds the download took; set only on the final `done` event.
     pub elapsed_secs: Option<f64>,
+    /// Recent throughput in bytes per second, smoothed over the last few
+    /// sampling intervals. Zero until the first interval elapses.
+    pub speed: u64,
     /// The sharing key this download authenticated with, if it wasn't the
     /// account's own app key.
     pub via_key: Option<String>,
@@ -1248,7 +1251,7 @@ async fn download_object(
 
     let dest_str = dest.display().to_string();
     let via_key = source.public_key();
-    let update = |written, total, done, error, elapsed_secs| {
+    let update = |written, total, done, error, elapsed_secs, speed| {
         emitter.send(Event::Download(DownloadProgress {
             object_id: object_id.clone(),
             dest: dest_str.clone(),
@@ -1257,6 +1260,7 @@ async fn download_object(
             done,
             error,
             elapsed_secs,
+            speed,
             via_key: via_key.clone(),
         }));
     };
@@ -1265,7 +1269,7 @@ async fn download_object(
     let result = async {
         let key: Hash256 = object_id.parse().context("invalid object id")?;
         let (total, mut reader) = source.open(&key).await?;
-        update(0, total, false, None, None);
+        update(0, total, false, None, None, 0);
 
         let mut file = tokio::fs::File::create(&dest)
             .await
@@ -1273,7 +1277,7 @@ async fn download_object(
 
         let mut buf = vec![0u8; 1 << 20];
         let mut written = 0u64;
-        let mut last_emit = 0u64;
+        let mut rate = Rate::default();
         loop {
             let n = reader.read(&mut buf).await.context("reading")?;
             if n == 0 {
@@ -1281,9 +1285,10 @@ async fn download_object(
             }
             file.write_all(&buf[..n]).await.context("writing file")?;
             written += n as u64;
-            if written - last_emit >= (4 << 20) {
-                last_emit = written;
-                update(written, total, false, None, None);
+            // Emitting on an interval (rather than every N bytes) keeps the
+            // reported throughput current even when the data arrives in bursts.
+            if let Some(speed) = rate.sample(written) {
+                update(written, total, false, None, None, speed);
             }
         }
         file.flush().await.context("flushing file")?;
@@ -1298,10 +1303,55 @@ async fn download_object(
             true,
             None,
             Some(started.elapsed().as_secs_f64()),
+            0,
         ),
-        Err(e) => update(0, 0, false, Some(format!("{e:#}")), None),
+        Err(e) => update(0, 0, false, Some(format!("{e:#}")), None, 0),
     }
     Ok(())
+}
+
+/// Tracks recent transfer throughput. [`Rate::sample`] is called with the
+/// running byte count as often as data arrives and yields a smoothed
+/// bytes-per-second figure once per [`Rate::INTERVAL`].
+struct Rate {
+    last: std::time::Instant,
+    last_bytes: u64,
+    /// Exponential moving average, so a bursty transfer doesn't read as a
+    /// wildly swinging number.
+    smoothed: f64,
+}
+
+impl Default for Rate {
+    fn default() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            last_bytes: 0,
+            smoothed: 0.0,
+        }
+    }
+}
+
+impl Rate {
+    /// How long a sampling interval is, and so how often progress is emitted.
+    const INTERVAL: Duration = Duration::from_millis(250);
+    /// Weight of the newest sample in the moving average.
+    const ALPHA: f64 = 0.35;
+
+    fn sample(&mut self, total_bytes: u64) -> Option<u64> {
+        let elapsed = self.last.elapsed();
+        if elapsed < Self::INTERVAL {
+            return None;
+        }
+        let instant = total_bytes.saturating_sub(self.last_bytes) as f64 / elapsed.as_secs_f64();
+        self.smoothed = if self.smoothed == 0.0 {
+            instant
+        } else {
+            Self::ALPHA * instant + (1.0 - Self::ALPHA) * self.smoothed
+        };
+        self.last = std::time::Instant::now();
+        self.last_bytes = total_bytes;
+        Some(self.smoothed as u64)
+    }
 }
 
 /// Runs the approval flow, persists the derived key, and starts syncing.
@@ -1526,5 +1576,29 @@ async fn sync_loop(emitter: Emitter, db_path: PathBuf, conn_id: i64, sdk: Sdk) {
                 tokio::time::sleep(SYNC_RETRY).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_samples_once_per_interval() {
+        let mut rate = Rate::default();
+        // Nothing is reported until an interval has elapsed.
+        assert_eq!(rate.sample(1 << 20), None);
+
+        std::thread::sleep(Rate::INTERVAL);
+        let first = rate.sample(2 << 20).expect("a sample after the interval");
+        // 1 MiB over ~250ms is ~4 MiB/s; allow slack for a loaded machine.
+        assert!(first > 1 << 20, "unexpectedly low rate: {first}");
+        assert_eq!(rate.sample(3 << 20), None);
+
+        // An interval with no new bytes pulls the average down rather than
+        // holding the last figure.
+        std::thread::sleep(Rate::INTERVAL);
+        let stalled = rate.sample(2 << 20).expect("a sample after the interval");
+        assert!(stalled < first, "{stalled} should be below {first}");
     }
 }

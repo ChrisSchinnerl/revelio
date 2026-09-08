@@ -38,13 +38,19 @@ impl App {
                             detail: Some(&d.dest),
                         }
                     } else {
-                        let sizes = format!("{} / {}", human_size(d.written), human_size(d.total));
+                        let mut text =
+                            format!("{} / {}", human_size(d.written), human_size(d.total));
+                        // Throughput appears once the first sampling interval
+                        // has elapsed.
+                        if d.speed > 0 {
+                            text += &format!(" · {}/s", human_size(d.speed));
+                        }
+                        if d.via_key.is_some() {
+                            text += " · via sharing key";
+                        }
                         TransferState::Progress {
                             frac: frac(d.written, d.total),
-                            text: match d.via_key {
-                                Some(_) => format!("{sizes} · via sharing key"),
-                                None => sizes,
-                            },
+                            text,
                         }
                     };
                     if transfer_card(ui, title, &hover, state) {

@@ -12,10 +12,12 @@ use crate::backend::{
     self, AccountInfo, Command, DownloadProgress, Event, HostInfo, ObjectView, SharedObjectInfo,
     SharingKeyInfo, SlabView, StatsInfo, UploadProgress,
 };
+use crate::logbuf::LogBuffer;
 
 mod data;
 mod format;
 mod hosts;
+mod logs;
 mod objects;
 mod sharing;
 mod transfers;
@@ -104,6 +106,12 @@ pub struct App {
     search_scroll_pending: bool,
     /// When a hash was last copied, for the transient "Copied" toast.
     copied_at: Option<Instant>,
+    /// The captured log tail, and the Logs panel's view of it.
+    logs: LogBuffer,
+    show_logs: bool,
+    log_filter: String,
+    log_level: log::LevelFilter,
+    log_follow: bool,
     tab: Tab,
     host_filter: String,
     host_good: GoodFilter,
@@ -177,7 +185,7 @@ fn configure_style(ctx: &egui::Context) {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, logs: LogBuffer) -> Self {
         configure_style(&cc.egui_ctx);
         let db_path = crate::db_path();
         log::info!("using database at {}", db_path.display());
@@ -214,6 +222,11 @@ impl App {
             slab_fetch_pending: HashSet::new(),
             search_scroll_pending: false,
             copied_at: None,
+            logs,
+            show_logs: false,
+            log_filter: String::new(),
+            log_level: log::LevelFilter::Trace,
+            log_follow: true,
             tab: Tab::default(),
             host_filter: String::new(),
             host_good: GoodFilter::default(),
@@ -638,8 +651,15 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(&self.status);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.toggle_value(&mut self.show_logs, "Logs")
+                        .on_hover_text("Show revelio's log output");
+                });
             });
         });
+
+        // Before the other panels, so the log tail spans the whole width.
+        self.logs_panel(ui);
 
         if self.show_connect {
             egui::Window::new("Add connection")

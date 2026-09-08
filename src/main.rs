@@ -1,6 +1,7 @@
 mod app;
 mod apps;
 mod backend;
+mod logbuf;
 mod store;
 mod worldmap;
 
@@ -134,9 +135,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .target(env_logger::Target::Stdout)
-        .init();
+    // Logs still go to stdout; the buffer backs the in-app Logs panel.
+    let logs = logbuf::init();
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -148,6 +148,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "revelio",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, logs)))),
     )
 }
